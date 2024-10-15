@@ -81,7 +81,7 @@ def create_dag(dag_id: str, m_name: Literal["random_forest", "linear_regression"
         # Сохранить файл в формате pkl на S3
         s3_hook.load_file_obj(
             file_obj=filebuffer,
-            key=f"2024/datasets/california_housing_{m_name}.pkl",
+            key=f"TatyanaPanyutina/{m_name}/datasets/california_housing.pkl",
             bucket_name=BUCKET,
             replace=True,
         )
@@ -92,9 +92,10 @@ def create_dag(dag_id: str, m_name: Literal["random_forest", "linear_regression"
     def prepare_data(**kwargs) -> Dict[str, Any]:
         metrics = kwargs['ti'].xcom_pull(task_ids='get_data')
         # Использовать созданный ранее S3 connection
-        start_timestamp = datetime.now()
+        metrics['start_data_preparation_time'] = datetime.now().strftime('%H:%M:%S %d.%m.%y')
         s3_hook = S3Hook("s3_connection")
-        file = s3_hook.download_file(key=f"2024/datasets/california_housing_{m_name}.pkl", bucket_name=BUCKET)
+        file = s3_hook.download_file(key=f"TatyanaPanyutina/{m_name}/datasets/california_housing.pkl",
+                                     bucket_name=BUCKET)
         data = pd.read_pickle(file)
 
         # Сделать препроцессинг
@@ -121,7 +122,7 @@ def create_dag(dag_id: str, m_name: Literal["random_forest", "linear_regression"
         resource = session.resource("s3")
 
         for name, data in zip(
-                [f"X_train_{m_name}", f"X_test_{m_name}", f"y_train_{m_name}", f"y_test_{m_name}"],
+                ["X_train", "X_test", "y_train", "y_test"],
                 [X_train_fitted, X_test_fitted, y_train, y_test],
         ):
             filebuffer = io.BytesIO()
@@ -129,27 +130,26 @@ def create_dag(dag_id: str, m_name: Literal["random_forest", "linear_regression"
             filebuffer.seek(0)
             s3_hook.load_file_obj(
                 file_obj=filebuffer,
-                key=f"2024/datasets/{name}.pkl",
+                key=f"TatyanaPanyutina/{m_name}/datasets/{name}.pkl",
                 bucket_name=BUCKET,
                 replace=True,
             )
 
-        end_timestamp = datetime.now()
-        metrics['prepare_data_time'] = end_timestamp - start_timestamp
+        metrics['end_data_preparation_time'] = datetime.now().strftime('%H:%M:%S %d.%m.%y')
 
         _LOG.info("Data prepared.")
         return metrics
 
-    def train_model(**kwargs) -> None:
-        metrics = kwargs['ti'].xcom_pull(task_ids='get_data')
-        start_timestamp = datetime.now()
+    def train_model(**kwargs) -> Dict[str, Any]:
+        metrics = kwargs['ti'].xcom_pull(task_ids='data_preparation')
+        metrics['start_train_model_time'] = datetime.now().strftime('%H:%M:%S %d.%m.%y')
         # Использовать созданный ранее S3 connection
         s3_hook = S3Hook("s3_connection")
         # Загрузить готовые данные с S3
         data = {}
         for name in ["X_train", "X_test", "y_train", "y_test"]:
             file = s3_hook.download_file(
-                key=f"2024/datasets/{name}_{m_name}.pkl",
+                key=f"TatyanaPanyutina/{m_name}/datasets/{name}.pkl",
                 bucket_name=BUCKET,
             )
             data[name] = pd.read_pickle(file)
@@ -164,26 +164,29 @@ def create_dag(dag_id: str, m_name: Literal["random_forest", "linear_regression"
         metrics["rmse"] = mean_squared_error(data["y_test"], prediction) ** 0.5
         metrics["mae"] = median_absolute_error(data["y_test"], prediction)
 
-        end_timestamp = datetime.now()
-        metrics['train_model_time'] = (end_timestamp - start_timestamp).total_seconds()
+        metrics['end_train_model_time'] = datetime.now().strftime('%H:%M:%S %d.%m.%y')
 
+        _LOG.info("Model trained.")
+        return metrics
+
+    def save_results(**kwargs) -> None:
+        metrics = kwargs['ti'].xcom_pull(task_ids='train_model')
         # Сохранить результат на S3
         date = datetime.now().strftime("%Y_%m_%d_%H")
+        s3_hook = S3Hook("s3_connection")
         filebuffer = io.BytesIO()
         filebuffer.write(json.dumps(metrics).encode())
         filebuffer.seek(0)
         s3_hook.load_file_obj(
             file_obj=filebuffer,
-            key=f"2024/metrics/{m_name}_{date}.pkl",
+            key=f"TatyanaPanyutina/{m_name}/results/{date}.pkl",
             bucket_name=BUCKET,
             replace=True,
         )
-        _LOG.info("Model trained.")
 
-    def save_results() -> None:
-        print('Files saved')
+        _LOG.info("Results saved.")
 
-        ####### INIT DAG #######
+    ####### INIT DAG #######
 
     dag = DAG(dag_id=dag_id,
               schedule_interval="0 1 * * *",
